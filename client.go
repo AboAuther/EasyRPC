@@ -2,6 +2,7 @@ package EasyRPC
 
 import (
 	"EasyRPC/codec"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"log"
 	"net"
 	"sync"
+	"time"
 )
 
 type Call struct {
@@ -17,7 +19,12 @@ type Call struct {
 	Args          interface{} // RPC调用时参数
 	Reply         interface{} // RPC调用返回的参数
 	Error         error
-	Done          chan *Call  // Strobes when call is complete.
+	Done          chan *Call // Strobes when call is complete.
+}
+
+type clientResult struct {
+	client *Client
+	err    error
 }
 
 func (call *Call) done() {
@@ -27,18 +34,20 @@ func (call *Call) done() {
 type Client struct {
 	cc       codec.Codec
 	opt      *Option
-	sending  sync.Mutex 		// 保证消息有序发送，防止报文混淆
+	sending  sync.Mutex // 保证消息有序发送，防止报文混淆
 	header   codec.Header
 	mu       sync.Mutex
-	seq      uint64				// 给发送的请求编号，每个请求拥有唯一编号
-	pending  map[uint64]*Call 	// pending 存储未处理完的请求，键是编号，值是 Call 实例
-	closing  bool				// 置true代表用户已主动关闭
-	shutdown bool 				// 置true代表服务端告知关闭
+	seq      uint64           // 给发送的请求编号，每个请求拥有唯一编号
+	pending  map[uint64]*Call // pending 存储未处理完的请求，键是编号，值是 Call 实例
+	closing  bool             // 置true代表用户已主动关闭
+	shutdown bool             // 置true代表服务端告知关闭
 }
 
 var _ io.Closer = (*Client)(nil)
 
 var ErrShutdown = errors.New("connection is shut down")
+
+type newClientFunc func(conn net.Conn, opt *Option) (client *Client, err error)
 
 // Close 关闭连接
 func (client *Client) Close() error {
@@ -164,13 +173,12 @@ func parseOptions(opts ...*Option) (*Option, error) {
 	return opt, nil
 }
 
-// Dial 连接到指定网络地址的 RPC 服务器
-func Dial(network, address string, opts ...*Option) (client *Client, err error) {
+func dialTimeout(f newClientFunc, network, address string, opts ...*Option) (client *Client, err error) {
 	opt, err := parseOptions(opts...)
 	if err != nil {
 		return nil, err
 	}
-	conn, err := net.Dial(network, address)
+	conn, err := net.DialTimeout(network, address, opt.ConnectTimeOut)
 	if err != nil {
 		return nil, err
 	}
@@ -180,7 +188,29 @@ func Dial(network, address string, opts ...*Option) (client *Client, err error) 
 			_ = conn.Close()
 		}
 	}()
-	return NewClient(conn, opt)
+	ch := make(chan clientResult)
+	go func() {
+		client, err := f(conn, opt)
+		ch <- clientResult{
+			client: client,
+			err:    err,
+		}
+	}()
+	if opt.ConnectTimeOut == 0 {
+		result := <-ch
+		return result.client, result.err
+	}
+	select {
+	case <-time.After(opt.ConnectTimeOut):
+		return nil, fmt.Errorf("rpc client: connect timeout:except within %s", opt.ConnectTimeOut)
+	case result := <-ch:
+		return result.client, result.err
+	}
+}
+
+// Dial 连接到指定网络地址的 RPC 服务器
+func Dial(network, address string, opts ...*Option) (client *Client, err error) {
+	return dialTimeout(NewClient, network, address, opts...)
 }
 
 func (client *Client) send(call *Call) {
@@ -230,7 +260,13 @@ func (client *Client) Go(serviceMethod string, args, reply interface{}, done cha
 }
 
 // Call 调用命名函数，等待它完成，并返回其错误状态
-func (client *Client) Call(serviceMethod string, args, reply interface{}) error {
-	call := <-client.Go(serviceMethod, args, reply, make(chan *Call, 1)).Done
-	return call.Error
+func (client *Client) Call(ctx context.Context, serviceMethod string, args, reply interface{}) error {
+	call := client.Go(serviceMethod, args, reply, make(chan *Call, 1))
+	select {
+	case <-ctx.Done():
+		client.removeCall(call.Seq)
+		return errors.New("rpc client:call failed: " + ctx.Err().Error())
+	case call := <-call.Done:
+		return call.Error
+	}
 }
