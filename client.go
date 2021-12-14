@@ -19,7 +19,7 @@ type Call struct {
 	Args          interface{} // RPC调用时参数
 	Reply         interface{} // RPC调用返回的参数
 	Error         error
-	Done          chan *Call // Strobes when call is complete.
+	Done          chan *Call // call结束时调用
 }
 
 type clientResult struct {
