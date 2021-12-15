@@ -2,6 +2,7 @@ package EasyRPC
 
 import (
 	"EasyRPC/codec"
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,8 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -19,7 +22,7 @@ type Call struct {
 	Args          interface{} // RPC调用时参数
 	Reply         interface{} // RPC调用返回的参数
 	Error         error
-	Done          chan *Call // Strobes when call is complete.
+	Done          chan *Call // call结束时调用
 }
 
 type clientResult struct {
@@ -102,7 +105,7 @@ func (client *Client) terminateCalls(err error) {
 	}
 }
 
-//receive
+//receive 监听客户端调用实例的回复，发生错误时终止退出
 func (client *Client) receive() {
 	var err error
 	for err == nil {
@@ -268,5 +271,38 @@ func (client *Client) Call(ctx context.Context, serviceMethod string, args, repl
 		return errors.New("rpc client:call failed: " + ctx.Err().Error())
 	case call := <-call.Done:
 		return call.Error
+	}
+}
+
+//NewHTTPClient 创建一个新的客户端实例通过HTTP作为传输协议
+func NewHTTPClient(conn net.Conn, opt *Option) (*Client, error) {
+	_, _ = io.WriteString(conn, fmt.Sprintf("CONNECT %s HTTP/1.0\n\n", defaultRPCPath))
+
+	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: "CONNECT"})
+	if err == nil && resp.Status == connected {
+		return NewClient(conn, opt)
+	}
+	if err == nil {
+		err = errors.New("unexpected HTTP response: " + resp.Status)
+	}
+	return nil, err
+}
+
+//DialHTTP 通过指定的 net address 连接到HTTP rpc服务器，监听默认的HTTP rpc路径
+func DialHTTP(network, address string, opt ...*Option) (*Client, error) {
+	return dialTimeout(NewHTTPClient, network, address, opt...)
+}
+
+func XDial(rpcAddr string, opts ...*Option) (*Client, error) {
+	parts := strings.Split(rpcAddr, "@")
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("rpc client err: wrong format '%s',expect protocol@addr", rpcAddr)
+	}
+	protocol, addr := parts[0], parts[1]
+	switch protocol {
+	case "http":
+		return DialHTTP("tcp", addr, opts...)
+	default:
+		return Dial(protocol, addr, opts...)
 	}
 }
