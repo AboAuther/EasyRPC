@@ -8,13 +8,19 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"reflect"
 	"strings"
 	"sync"
 	"time"
 )
 
-const MagicNumber = 0x3bef5c //0011 1011 1110 1111 0101 1100
+const (
+	MagicNumber      = 0x3bef5c //0011 1011 1110 1111 0101 1100
+	connected        = "200 Connected to EasyRPC"
+	defaultRPCPath   = "/_EasyRPC_"
+	defaultDebugPath = "/debug/EasyRPC"
+)
 
 //Option 包含后续的编码解码方式
 type Option struct {
@@ -222,5 +228,34 @@ func (server *Server) Register(rcvr interface{}) error {
 	return nil
 }
 
-//Register publishes the receiver's methods in the DefaultServer.
+//Register 用于默认服务器注册服务
 func Register(rcvr interface{}) error { return DefaultServer.Register(rcvr) }
+
+//ServeHTTP 实现了http.Handler函数用于回复RPC请求
+func (server *Server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	if req.Method != "CONNECT" {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_, _ = io.WriteString(w, "405 must CONNECT\n")
+		return
+	}
+	conn, _, err := w.(http.Hijacker).Hijack()
+	if err != nil {
+		log.Print("rpc hijacking ", req.RemoteAddr, ": ", err.Error())
+		return
+	}
+	_, _ = io.WriteString(conn, "HTTP/1.0 "+connected+"\n\n")
+	server.ServeConn(conn)
+}
+
+//HandleHTTP 在默认RPC路径下注册一个处理函数
+func (server *Server) HandleHTTP() {
+	http.Handle(defaultRPCPath, server)
+	http.Handle(defaultDebugPath, debugHTTP{server})
+	log.Println("rpc server debug path: ", defaultDebugPath)
+}
+
+//HandleHTTP 用于默认服务器注册HTTP处理函数
+func HandleHTTP() {
+	DefaultServer.HandleHTTP()
+}

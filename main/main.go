@@ -5,6 +5,7 @@ import (
 	"context"
 	"log"
 	"net"
+	"net/http"
 	"sync"
 	"time"
 )
@@ -22,35 +23,42 @@ func (f *Foo) Sum(args Args, reply *int) error {
 
 func startServer(addr chan string) {
 	var foo Foo
+	// pick a free port
+
 	if err := EasyRPC.Register(&foo); err != nil {
 		log.Fatal("register error", err)
 	}
-
-	// pick a free port
-	listener, err := net.Listen("tcp", ":0")
+	listener, err := net.Listen("tcp", ":9999")
 	if err != nil {
 		log.Fatal("network error:", err)
 	}
-	log.Println("start rpc server on", listener.Addr())
-
+	//log.Println("start rpc server on", listener.Addr())
+	EasyRPC.HandleHTTP()
 	addr <- listener.Addr().String()
-	EasyRPC.Accept(listener)
+	err = http.Serve(listener, nil)
+	if err != nil {
+		log.Fatal("http serve error:", err)
+	}
 }
 
 func main() {
 	log.SetFlags(0)
 	addr := make(chan string)
-	go startServer(addr)
-	client, _ := EasyRPC.Dial("tcp", <-addr)
-	defer func() { _ = client.Close() }()
+	go call(addr)
+	startServer(addr)
 
+}
+
+func call(addrCh chan string) {
+	client, _ := EasyRPC.DialHTTP("tcp", <-addrCh)
+	defer func() {
+		_ = client.Close()
+	}()
 	time.Sleep(time.Second)
 
 	var wg sync.WaitGroup
 
-	// send request & receive response
 	for i := 0; i < 5; i++ {
-
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
@@ -59,7 +67,7 @@ func main() {
 			}
 			var reply int
 			if err := client.Call(context.Background(), "Foo.Sum", args, &reply); err != nil {
-				log.Fatal("call Foo.Sum error:", err)
+				log.Fatal("call Foo.Sum error: ", err)
 			}
 			log.Printf("%d + %d = %d", args.Num2, args.Num1, reply)
 		}(i)
